@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">Digital Munshi</string>
+    <string name="tagline">Enterprise Offline POS &amp; ERP</string>
+    <string name="pos_cart">Active Cart</string>
+    <string name="checkout">Proceed to Checkout</string>
+    <string name="dynamic_upi_qr">Dynamic UPI QR</string>
+    <string name="khata_credit_exceeded">Credit Limit Exceeded!</string>
+    <string name="cashier_locked">Restricted: Admin Authorization Required</string>
+</resources>

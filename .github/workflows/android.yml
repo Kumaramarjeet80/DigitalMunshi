@@ -1,0 +1,38 @@
+name: Android CI & Release Build
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: gradle
+
+    - name: Grant Execute Permission for Gradlew
+      run: chmod +x gradlew
+
+    - name: Run Unit Tests
+      run: ./gradlew testReleaseUnitTest --stacktrace
+
+    - name: Build Optimized Release APK
+      run: ./gradlew assembleRelease --stacktrace
+
+    - name: Upload Release APK Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: DigitalMunshi-Release-APK
+        path: app/build/outputs/apk/release/app-release.apk
+        if-no-files-found: error

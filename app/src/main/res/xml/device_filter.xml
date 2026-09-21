@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- USB Printer Class (Base Class 7) -->
+    <usb-device class="7" />
+    <!-- Communication Device Class (CDC / Serial Weighing Scales) -->
+    <usb-device class="2" />
+    <usb-device class="10" />
+    <!-- FTDI, CP210x, CH34x, Prolific USB-Serial chips for weighing scales -->
+    <usb-device vendor-id="1027" /> <!-- FTDI -->
+    <usb-device vendor-id="4292" /> <!-- CP210x -->
+    <usb-device vendor-id="6790" /> <!-- CH340 / CH341 -->
+    <usb-device vendor-id="1659" /> <!-- Prolific PL2303 -->
+</resources>

@@ -1,0 +1,19 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+*.hprof
+
+# Build output
+app/build/
+!app/build/outputs/apk/release/app-release.apk
+
+# Keystores & OS
+*.jks
+*.keystore
+Thumbs.db
