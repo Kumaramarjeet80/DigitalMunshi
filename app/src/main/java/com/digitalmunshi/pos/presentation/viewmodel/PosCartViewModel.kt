@@ -1,11 +1,13 @@
 package com.digitalmunshi.pos.presentation.viewmodel
 
+import android.content.Context
 import android.graphics.Bitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.digitalmunshi.pos.core.hardware.display.CustomerFacingPresentation
 import com.digitalmunshi.pos.core.hardware.escpos.EscPosDriver
 import com.digitalmunshi.pos.core.hardware.escpos.StoreReceiptMetadata
+import com.digitalmunshi.pos.core.hardware.printer.InvoicePdfGenerator
 import com.digitalmunshi.pos.core.hardware.printer.UsbEscPosPrinter
 import com.digitalmunshi.pos.core.qr.DynamicUpiQrGenerator
 import com.digitalmunshi.pos.core.security.SessionManager
@@ -22,14 +24,22 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 
-data class PosCartUiState(
-    val items: List<CartItem> = emptyList(),
+data class PosUiState(
+    val productList: List<ProductEntity> = emptyList(),
+    val filteredProducts: List<ProductEntity> = emptyList(),
+    val categories: List<String> = listOf("All"),
+    val selectedCategory: String = "All",
+    val searchQuery: String = "",
+    val cartItems: List<CartItem> = emptyList(),
     val totals: CartTotals = CartTotals(0.0, 0.0, 0.0, 0.0, 0, 0.0),
     val selectedCustomer: KhataCustomerEntity? = null,
     val paymentMode: PaymentMode = PaymentMode.CASH,
+    val tenderedCashAmount: Double = 0.0,
+    val changeDueAmount: Double = 0.0,
     val splitCashAmount: Double = 0.0,
     val splitCreditAmount: Double = 0.0,
     val dynamicUpiUri: String? = null,
@@ -37,10 +47,11 @@ data class PosCartUiState(
     val isProcessingCheckout: Boolean = false,
     val errorMessage: String? = null,
     val completedTransaction: TransactionEntity? = null,
+    val lastGeneratedInvoiceFile: File? = null,
+    val heldCarts: Map<String, List<CartItem>> = emptyMap(),
     val canViewCostPrices: Boolean = false,
     val merchantVpa: String = "merchant@upi",
-    val merchantName: String = "Digital Munshi POS",
-    val searchQuery: String = ""
+    val merchantName: String = "Digital Munshi Store"
 )
 
 class PosCartViewModel(
@@ -52,14 +63,28 @@ class PosCartViewModel(
     private var customerPresentation: CustomerFacingPresentation? = null
 ) : ViewModel() {
 
-    private val _uiState = MutableStateFlow(PosCartUiState())
-    val uiState: StateFlow<PosCartUiState> = _uiState.asStateFlow()
+    private val _uiState = MutableStateFlow(PosUiState())
+    val uiState: StateFlow<PosUiState> = _uiState.asStateFlow()
 
     private val escPosDriver = EscPosDriver()
     private val invoiceDateFormat = SimpleDateFormat("yyMMddHHmmss", Locale.US)
 
     init {
-        // Observe active session permissions
+        // 1. Observe products directly from Room SQLCipher DB Flow
+        viewModelScope.launch {
+            productDao.getAllProductsFlow().collect { allProducts ->
+                val distinctCategories = listOf("All") + allProducts.map { it.category }.distinct().sorted()
+                _uiState.update { current ->
+                    current.copy(
+                        productList = allProducts,
+                        categories = distinctCategories,
+                        filteredProducts = filterProducts(allProducts, current.searchQuery, current.selectedCategory)
+                    )
+                }
+            }
+        }
+
+        // 2. Observe active session permissions (Admin vs Cashier)
         viewModelScope.launch {
             SessionManager.currentSession.collect { session ->
                 _uiState.update { it.copy(canViewCostPrices = SessionManager.canViewCostPrice()) }
@@ -72,17 +97,44 @@ class PosCartViewModel(
         syncCustomerDisplay()
     }
 
-    /**
-     * Real-time Scanner Event Handler:
-     * Accepts barcode from Camera feed or physical USB/Bluetooth barcode guns.
-     */
+    // --- Search & Filter Logic ---
+    fun setSearchQuery(query: String) {
+        _uiState.update { current ->
+            current.copy(
+                searchQuery = query,
+                filteredProducts = filterProducts(current.productList, query, current.selectedCategory)
+            )
+        }
+    }
+
+    fun setCategoryFilter(category: String) {
+        _uiState.update { current ->
+            current.copy(
+                selectedCategory = category,
+                filteredProducts = filterProducts(current.productList, current.searchQuery, category)
+            )
+        }
+    }
+
+    private fun filterProducts(products: List<ProductEntity>, query: String, category: String): List<ProductEntity> {
+        return products.filter { product ->
+            val matchesCategory = (category == "All" || product.category.equals(category, ignoreCase = true))
+            val matchesQuery = query.isBlank() ||
+                    product.name.contains(query, ignoreCase = true) ||
+                    product.barcode.contains(query, ignoreCase = true) ||
+                    product.sku.contains(query, ignoreCase = true)
+            matchesCategory && matchesQuery
+        }
+    }
+
+    // --- Real-Time Scanner Event Handler ---
     fun onBarcodeScanned(barcode: String) {
         viewModelScope.launch(Dispatchers.IO) {
             val product = productDao.getProductByBarcode(barcode.trim())
             if (product != null) {
                 addProductToCart(product)
             } else {
-                _uiState.update { it.copy(errorMessage = "Product with barcode '$barcode' not found.") }
+                _uiState.update { it.copy(errorMessage = "Barcode '$barcode' not found.") }
             }
         }
     }
@@ -94,21 +146,18 @@ class PosCartViewModel(
     }
 
     private suspend fun addProductToCart(product: ProductEntity) {
-        val currentItems = _uiState.value.items.toMutableList()
+        val currentItems = _uiState.value.cartItems.toMutableList()
         val existingIndex = currentItems.indexOfFirst { it.product.id == product.id }
 
-        // Find available batch FIFO
         val availableBatches = batchDao.getAvailableBatchesFIFO(product.id)
         val selectedBatch = availableBatches.firstOrNull()
 
         if (existingIndex >= 0) {
-            // Increment existing item quantity by 1.0 (or 0.250 kg for weight items)
             val existing = currentItems[existingIndex]
             val delta = if (product.unitType.allowsFractional) 0.5 else 1.0
-            val updated = existing.copy(quantity = existing.quantity + delta)
-            currentItems[existingIndex] = updated
+            currentItems[existingIndex] = existing.copy(quantity = existing.quantity + delta)
         } else {
-            val defaultQty = if (product.unitType.allowsFractional) 1.0 else 1.0
+            val defaultQty = 1.0
             currentItems.add(
                 CartItem(
                     product = product,
@@ -121,19 +170,16 @@ class PosCartViewModel(
         recalculateCart(currentItems)
     }
 
-    /**
-     * Updates item quantity with support for fractional weights (e.g. 1.450 kg).
-     * Automatically triggers Dynamic Tier Switching if quantity >= wholesaleMinQty!
-     */
+    // --- Cart Mutations with Decimal Weights & Dynamic Tier Switching ---
     fun updateItemQuantity(cartItemId: String, newQuantity: Double) {
         if (newQuantity <= 0.0) {
             removeItem(cartItemId)
             return
         }
 
-        val updatedItems = _uiState.value.items.map { item ->
+        val updatedItems = _uiState.value.cartItems.map { item ->
             if (item.cartItemId == cartItemId) {
-                // Dynamic tier switching happens automatically via CartItem property
+                // Dynamic tier switching recalculates automatically via CartItem property
                 item.copy(quantity = newQuantity)
             } else {
                 item
@@ -143,9 +189,6 @@ class PosCartViewModel(
         recalculateCart(updatedItems)
     }
 
-    /**
-     * Directly injects fractional weight reading from USB-Serial weighing scale (e.g. 1.450 kg).
-     */
     fun applyWeighingScaleWeight(cartItemId: String, weightKg: Double) {
         if (weightKg > 0.0) {
             updateItemQuantity(cartItemId, weightKg)
@@ -153,7 +196,7 @@ class PosCartViewModel(
     }
 
     fun removeItem(cartItemId: String) {
-        val updatedItems = _uiState.value.items.filterNot { it.cartItemId == cartItemId }
+        val updatedItems = _uiState.value.cartItems.filterNot { it.cartItemId == cartItemId }
         recalculateCart(updatedItems)
     }
 
@@ -165,12 +208,37 @@ class PosCartViewModel(
                 dynamicUpiUri = null,
                 dynamicUpiBitmap = null,
                 completedTransaction = null,
+                lastGeneratedInvoiceFile = null,
+                tenderedCashAmount = 0.0,
+                changeDueAmount = 0.0,
                 errorMessage = null
             )
         }
         customerPresentation?.reset()
     }
 
+    // --- Hold / Park Cart Feature ---
+    fun holdCurrentCart(cartName: String = "Order #${System.currentTimeMillis() % 10000}") {
+        val currentItems = _uiState.value.cartItems
+        if (currentItems.isEmpty()) return
+
+        val newHeld = _uiState.value.heldCarts.toMutableMap()
+        newHeld[cartName] = currentItems
+
+        _uiState.update { it.copy(heldCarts = newHeld) }
+        clearCart()
+    }
+
+    fun recallHeldCart(cartName: String) {
+        val heldItems = _uiState.value.heldCarts[cartName] ?: return
+        val newHeld = _uiState.value.heldCarts.toMutableMap()
+        newHeld.remove(cartName)
+
+        _uiState.update { it.copy(heldCarts = newHeld) }
+        recalculateCart(heldItems)
+    }
+
+    // --- Payment & Tender Management ---
     fun setPaymentMode(mode: PaymentMode) {
         _uiState.update { it.copy(paymentMode = mode) }
         refreshDynamicUpiQr()
@@ -178,6 +246,17 @@ class PosCartViewModel(
 
     fun selectKhataCustomer(customer: KhataCustomerEntity?) {
         _uiState.update { it.copy(selectedCustomer = customer) }
+    }
+
+    fun setTenderedCash(tendered: Double) {
+        val grandTotal = _uiState.value.totals.grandTotal
+        val change = maxOf(0.0, tendered - grandTotal)
+        _uiState.update {
+            it.copy(
+                tenderedCashAmount = tendered,
+                changeDueAmount = change
+            )
+        }
     }
 
     fun setSplitAmounts(cashPortion: Double, creditPortion: Double) {
@@ -193,6 +272,32 @@ class PosCartViewModel(
         _uiState.update { it.copy(errorMessage = null) }
     }
 
+    fun dismissSuccess() {
+        _uiState.update { it.copy(completedTransaction = null, lastGeneratedInvoiceFile = null) }
+    }
+
+    // --- Immediate Room SQLCipher Product Persistence ---
+    fun saveOrUpdateProduct(product: ProductEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                if (product.id == 0L) {
+                    productDao.insertProduct(product)
+                } else {
+                    productDao.updateProduct(product)
+                }
+            } catch (e: Exception) {
+                _uiState.update { it.copy(errorMessage = "Failed to save product: ${e.message}") }
+            }
+        }
+    }
+
+    fun deleteProduct(productId: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            productDao.softDeleteProduct(productId)
+        }
+    }
+
+    // --- Live Recalculation Engine ---
     private fun recalculateCart(items: List<CartItem>) {
         var subtotal = 0.0
         var taxTotal = 0.0
@@ -218,10 +323,14 @@ class PosCartViewModel(
             totalWeightKg = totalWeight
         )
 
+        val tendered = _uiState.value.tenderedCashAmount
+        val change = if (tendered > 0.0) maxOf(0.0, tendered - grandTotal) else 0.0
+
         _uiState.update {
             it.copy(
-                items = items,
-                totals = totals
+                cartItems = items,
+                totals = totals,
+                changeDueAmount = change
             )
         }
 
@@ -229,9 +338,6 @@ class PosCartViewModel(
         syncCustomerDisplay()
     }
 
-    /**
-     * Generates a compliant NPCI Dynamic UPI QR code populated with the exact cart total.
-     */
     private fun refreshDynamicUpiQr() {
         val state = _uiState.value
         if (state.totals.grandTotal > 0.0 && (state.paymentMode == PaymentMode.UPI || state.paymentMode == PaymentMode.SPLIT)) {
@@ -242,7 +348,7 @@ class PosCartViewModel(
                 payeeName = state.merchantName,
                 amount = amountToPay,
                 transactionRef = refId,
-                transactionNote = "POS Billing"
+                transactionNote = "POS Bill"
             )
             val bitmap = DynamicUpiQrGenerator.generateQrBitmap(uri, 512, 512)
 
@@ -265,22 +371,16 @@ class PosCartViewModel(
     private fun syncCustomerDisplay() {
         val state = _uiState.value
         customerPresentation?.updateCart(
-            items = state.items,
+            items = state.cartItems,
             totals = state.totals,
             upiUri = state.dynamicUpiUri
         )
     }
 
-    /**
-     * Executes atomic Room @Transaction checkout:
-     * - Validates inventory and Khata credit limits
-     * - Decrements batch & product stock
-     * - Writes invoice & Khata ledger
-     * - Triggers ESC/POS receipt printing & cash drawer kick pulse
-     */
-    fun processCheckout() {
+    // --- Atomic Checkout with Offline PDF Receipt Generation ---
+    fun processCheckout(context: Context) {
         val state = _uiState.value
-        if (state.items.isEmpty()) {
+        if (state.cartItems.isEmpty()) {
             _uiState.update { it.copy(errorMessage = "Cart is empty.") }
             return
         }
@@ -309,9 +409,9 @@ class PosCartViewModel(
                     customerId = state.selectedCustomer?.id
                 )
 
-                val itemEntities = state.items.map { item ->
+                val itemEntities = state.cartItems.map { item ->
                     TransactionItemEntity(
-                        transactionId = 0L, // Populated atomically inside Dao
+                        transactionId = 0L,
                         productId = item.product.id,
                         batchId = item.selectedBatch?.id,
                         quantity = item.quantity,
@@ -322,8 +422,9 @@ class PosCartViewModel(
                     )
                 }
 
-                // ATOMIC ROOM EXECUTION:
                 val creditAmount = if (state.paymentMode == PaymentMode.SPLIT) state.splitCreditAmount else state.totals.grandTotal
+
+                // Atomic Room Transaction (Database Execution)
                 val txId = withContext(Dispatchers.IO) {
                     transactionDao.processCheckout(
                         transaction = transaction,
@@ -334,17 +435,32 @@ class PosCartViewModel(
 
                 val completedTx = transaction.copy(id = txId)
 
-                // Trigger Hardware Printing & Drawer Kick asynchronously
-                printReceiptAndKickDrawer(completedTx, state.items, state.totals, state.dynamicUpiBitmap)
+                // Generate Offline Printable PDF Receipt immediately in local app storage
+                val generatedPdf = withContext(Dispatchers.IO) {
+                    InvoicePdfGenerator.generateInvoicePdf(
+                        context = context,
+                        store = StoreReceiptMetadata(),
+                        transaction = completedTx,
+                        items = state.cartItems,
+                        totals = state.totals,
+                        upiQrBitmap = state.dynamicUpiBitmap
+                    )
+                }
 
-                // Notify Customer Display
+                // Send to hardware thermal printer if USB printer connected
+                withContext(Dispatchers.IO) {
+                    printThermalReceipt(completedTx, state.cartItems, state.totals, state.dynamicUpiBitmap)
+                }
+
+                // Update customer presentation
                 customerPresentation?.showOrderCompleted(completedTx.invoiceNo, completedTx.grandTotal)
 
                 _uiState.update {
                     it.copy(
                         isProcessingCheckout = false,
                         completedTransaction = completedTx,
-                        items = emptyList(),
+                        lastGeneratedInvoiceFile = generatedPdf,
+                        cartItems = emptyList(),
                         totals = CartTotals(0.0, 0.0, 0.0, 0.0, 0, 0.0),
                         dynamicUpiUri = null,
                         dynamicUpiBitmap = null
@@ -361,13 +477,13 @@ class PosCartViewModel(
         }
     }
 
-    private suspend fun printReceiptAndKickDrawer(
+    private suspend fun printThermalReceipt(
         tx: TransactionEntity,
         items: List<CartItem>,
         totals: CartTotals,
         upiBitmap: Bitmap?
-    ) = withContext(Dispatchers.IO) {
-        val printer = usbPrinter ?: return@withContext
+    ) {
+        val printer = usbPrinter ?: return
         try {
             val receiptBytes = escPosDriver.buildReceiptBytes(
                 store = StoreReceiptMetadata(),
@@ -380,8 +496,6 @@ class PosCartViewModel(
                 triggerCashDrawer = (tx.paymentMode == PaymentMode.CASH)
             )
             printer.printBytes(receiptBytes)
-        } catch (_: Exception) {
-            // Hardware printing failure does not invalidate database commit
-        }
+        } catch (_: Exception) {}
     }
 }

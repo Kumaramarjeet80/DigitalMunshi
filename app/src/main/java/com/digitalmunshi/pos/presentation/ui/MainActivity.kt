@@ -1,19 +1,27 @@
 package com.digitalmunshi.pos.presentation.ui
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Bundle
-import android.view.Display
 import android.view.KeyEvent
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import com.digitalmunshi.pos.DigitalMunshiApp
@@ -25,7 +33,7 @@ import com.digitalmunshi.pos.core.security.SessionManager
 import com.digitalmunshi.pos.data.backup.BackupProfile
 import com.digitalmunshi.pos.data.backup.SecureBackupManager
 import com.digitalmunshi.pos.domain.models.UserRole
-import com.digitalmunshi.pos.presentation.theme.DigitalMunshiTheme
+import com.digitalmunshi.pos.presentation.theme.*
 import com.digitalmunshi.pos.presentation.viewmodel.BackupRestoreViewModel
 import com.digitalmunshi.pos.presentation.viewmodel.ExpiryRadarViewModel
 import com.digitalmunshi.pos.presentation.viewmodel.KhataViewModel
@@ -34,11 +42,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-enum class CurrentScreen {
-    POS,
-    EXPIRY_RADAR,
-    KHATA,
-    BACKUP
+enum class CurrentScreen(val title: String) {
+    POS("POS Billing"),
+    EXPIRY_RADAR("Inventory"),
+    KHATA("Khata Ledger"),
+    BACKUP("Settings & Vault")
 }
 
 class MainActivity : ComponentActivity() {
@@ -120,7 +128,7 @@ class MainActivity : ComponentActivity() {
             usbPrinter.findAndConnectPrinter()
         }
 
-        // Initialize Hardware Barcode Gun Interceptor
+        // Initialize Hardware Barcode Gun Interceptor (USB-HID & BT-SPP)
         hardwareScanner = HardwareScannerInterceptor { barcode ->
             posViewModel.onBarcodeScanned(barcode)
         }
@@ -132,49 +140,185 @@ class MainActivity : ComponentActivity() {
             DigitalMunshiTheme {
                 var currentScreen by remember { mutableStateOf(CurrentScreen.POS) }
                 var showPinDialog by remember { mutableStateOf(false) }
+                var showCameraScanner by remember { mutableStateOf(false) }
 
-                val products by db.productDao().getAllProductsFlow().collectAsState(initial = emptyList())
                 val customers by db.khataDao().getAllCustomersFlow().collectAsState(initial = emptyList())
 
-                when (currentScreen) {
-                    CurrentScreen.POS -> {
-                        PosScreen(
-                            viewModel = posViewModel,
-                            availableProducts = products,
-                            khataCustomers = customers,
-                            onOpenExpiryRadar = { currentScreen = CurrentScreen.EXPIRY_RADAR },
-                            onOpenKhata = { currentScreen = CurrentScreen.KHATA },
-                            onOpenBackup = { currentScreen = CurrentScreen.BACKUP },
-                            onSwitchUser = { showPinDialog = true }
-                        )
+                val cameraPermissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission()
+                ) { isGranted ->
+                    if (isGranted) {
+                        showCameraScanner = true
+                    } else {
+                        Toast.makeText(this@MainActivity, "Camera permission needed to scan barcodes", Toast.LENGTH_SHORT).show()
                     }
-                    CurrentScreen.EXPIRY_RADAR -> {
-                        ExpiryRadarScreen(
-                            viewModel = expiryViewModel,
-                            onNavigateBack = { currentScreen = CurrentScreen.POS }
-                        )
+                }
+
+                Scaffold(
+                    bottomBar = {
+                        NavigationBar(
+                            containerColor = Color.White,
+                            tonalElevation = 8.dp
+                        ) {
+                            NavigationBarItem(
+                                selected = currentScreen == CurrentScreen.POS,
+                                onClick = { currentScreen = CurrentScreen.POS },
+                                icon = {
+                                    Icon(
+                                        Icons.Default.ShoppingCart,
+                                        contentDescription = "POS Billing"
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        "Billing",
+                                        fontSize = 11.sp,
+                                        fontWeight = if (currentScreen == CurrentScreen.POS) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                },
+                                colors = NavigationBarItemDefaults.colors(
+                                    selectedIconColor = PrimaryNavy,
+                                    selectedTextColor = PrimaryNavy,
+                                    indicatorColor = BrandEmerald.copy(alpha = 0.2f),
+                                    unselectedIconColor = Slate400,
+                                    unselectedTextColor = Slate400
+                                )
+                            )
+                            NavigationBarItem(
+                                selected = currentScreen == CurrentScreen.EXPIRY_RADAR,
+                                onClick = { currentScreen = CurrentScreen.EXPIRY_RADAR },
+                                icon = {
+                                    Icon(
+                                        Icons.Default.Inventory2,
+                                        contentDescription = "Expiry Radar"
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        "Inventory",
+                                        fontSize = 11.sp,
+                                        fontWeight = if (currentScreen == CurrentScreen.EXPIRY_RADAR) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                },
+                                colors = NavigationBarItemDefaults.colors(
+                                    selectedIconColor = PrimaryNavy,
+                                    selectedTextColor = PrimaryNavy,
+                                    indicatorColor = BrandEmerald.copy(alpha = 0.2f),
+                                    unselectedIconColor = Slate400,
+                                    unselectedTextColor = Slate400
+                                )
+                            )
+                            NavigationBarItem(
+                                selected = currentScreen == CurrentScreen.KHATA,
+                                onClick = { currentScreen = CurrentScreen.KHATA },
+                                icon = {
+                                    Icon(
+                                        Icons.Default.AccountBalanceWallet,
+                                        contentDescription = "Khata Debt"
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        "Khata",
+                                        fontSize = 11.sp,
+                                        fontWeight = if (currentScreen == CurrentScreen.KHATA) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                },
+                                colors = NavigationBarItemDefaults.colors(
+                                    selectedIconColor = PrimaryNavy,
+                                    selectedTextColor = PrimaryNavy,
+                                    indicatorColor = BrandEmerald.copy(alpha = 0.2f),
+                                    unselectedIconColor = Slate400,
+                                    unselectedTextColor = Slate400
+                                )
+                            )
+                            NavigationBarItem(
+                                selected = currentScreen == CurrentScreen.BACKUP,
+                                onClick = { currentScreen = CurrentScreen.BACKUP },
+                                icon = {
+                                    Icon(
+                                        Icons.Default.SettingsBackupRestore,
+                                        contentDescription = "Settings & Backup"
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        "Vault",
+                                        fontSize = 11.sp,
+                                        fontWeight = if (currentScreen == CurrentScreen.BACKUP) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                },
+                                colors = NavigationBarItemDefaults.colors(
+                                    selectedIconColor = PrimaryNavy,
+                                    selectedTextColor = PrimaryNavy,
+                                    indicatorColor = BrandEmerald.copy(alpha = 0.2f),
+                                    unselectedIconColor = Slate400,
+                                    unselectedTextColor = Slate400
+                                )
+                            )
+                        }
                     }
-                    CurrentScreen.KHATA -> {
-                        KhataLedgerScreen(
-                            viewModel = khataViewModel,
-                            onNavigateBack = { currentScreen = CurrentScreen.POS }
-                        )
+                ) { innerPadding ->
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(innerPadding)
+                    ) {
+                        when (currentScreen) {
+                            CurrentScreen.POS -> {
+                                PosScreen(
+                                    viewModel = posViewModel,
+                                    khataCustomers = customers,
+                                    onTriggerCameraScan = {
+                                        if (ContextCompat.checkSelfPermission(this@MainActivity, android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                                            showCameraScanner = true
+                                        } else {
+                                            cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
+                                        }
+                                    },
+                                    onSwitchUser = { showPinDialog = true }
+                                )
+                            }
+                            CurrentScreen.EXPIRY_RADAR -> {
+                                ExpiryRadarScreen(
+                                    viewModel = expiryViewModel,
+                                    onNavigateBack = { currentScreen = CurrentScreen.POS }
+                                )
+                            }
+                            CurrentScreen.KHATA -> {
+                                KhataLedgerScreen(
+                                    viewModel = khataViewModel,
+                                    onNavigateBack = { currentScreen = CurrentScreen.POS }
+                                )
+                            }
+                            CurrentScreen.BACKUP -> {
+                                BackupRestoreScreen(
+                                    viewModel = backupViewModel,
+                                    onRequestCreateBackup = { profile, pin ->
+                                        pendingBackupPin = pin
+                                        backupViewModel.setProfile(profile)
+                                        createBackupLauncher.launch("DigitalMunshi_Backup_${System.currentTimeMillis()}.dmb")
+                                    },
+                                    onRequestRestoreBackup = { pin ->
+                                        pendingRestorePin = pin
+                                        restoreBackupLauncher.launch(arrayOf("*/*"))
+                                    },
+                                    onNavigateBack = { currentScreen = CurrentScreen.POS }
+                                )
+                            }
+                        }
                     }
-                    CurrentScreen.BACKUP -> {
-                        BackupRestoreScreen(
-                            viewModel = backupViewModel,
-                            onRequestCreateBackup = { profile, pin ->
-                                pendingBackupPin = pin
-                                backupViewModel.setProfile(profile)
-                                createBackupLauncher.launch("DigitalMunshi_Backup_${System.currentTimeMillis()}.dmb")
-                            },
-                            onRequestRestoreBackup = { pin ->
-                                pendingRestorePin = pin
-                                restoreBackupLauncher.launch(arrayOf("*/*"))
-                            },
-                            onNavigateBack = { currentScreen = CurrentScreen.POS }
-                        )
-                    }
+                }
+
+                // Camera Barcode Scanner Viewfinder Dialog
+                if (showCameraScanner) {
+                    CameraBarcodeScannerDialog(
+                        onDismiss = { showCameraScanner = false },
+                        onBarcodeDetected = { barcode ->
+                            posViewModel.onBarcodeScanned(barcode)
+                            Toast.makeText(this@MainActivity, "Scanned: $barcode", Toast.LENGTH_SHORT).show()
+                        }
+                    )
                 }
 
                 // PIN Dialog for Role Switch (Admin vs Cashier)
@@ -190,6 +334,11 @@ class MainActivity : ComponentActivity() {
                                         SessionManager.login(adminUser)
                                         withContext(Dispatchers.Main) {
                                             showPinDialog = false
+                                            Toast.makeText(this@MainActivity, "Unlocked as Admin", Toast.LENGTH_SHORT).show()
+                                        }
+                                    } else {
+                                        withContext(Dispatchers.Main) {
+                                            Toast.makeText(this@MainActivity, "Invalid PIN", Toast.LENGTH_SHORT).show()
                                         }
                                     }
                                 }
@@ -243,20 +392,25 @@ fun AdminPinDialog(
     var pin by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Enter Admin PIN to Unlock") },
+        title = { Text("Enter Admin PIN to Unlock", fontWeight = FontWeight.Bold) },
         text = {
             Column {
                 Text("Cashier lock active. Enter Admin PIN (Default: 1234):", style = MaterialTheme.typography.bodyMedium)
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(10.dp))
                 OutlinedTextField(
                     value = pin,
                     onValueChange = { if (it.length <= 8) pin = it },
-                    singleLine = true
+                    singleLine = true,
+                    placeholder = { Text("1234") },
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
         },
         confirmButton = {
-            Button(onClick = { onVerifyPin(pin) }) {
+            Button(
+                onClick = { onVerifyPin(pin) },
+                colors = ButtonDefaults.buttonColors(containerColor = PrimaryNavy)
+            ) {
                 Text("Unlock")
             }
         },

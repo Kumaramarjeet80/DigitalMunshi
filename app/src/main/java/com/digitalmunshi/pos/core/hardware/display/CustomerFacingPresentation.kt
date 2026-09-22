@@ -158,7 +158,7 @@ fun CustomerDisplayScreen(state: CustomerDisplayState) {
                     LazyColumn(modifier = Modifier.fillMaxSize()) {
                         items(state.items) { item ->
                             CustomerCartRow(item = item)
-                            Divider(color = Color(0xFF334155), thickness = 0.5.dp)
+                            HorizontalDivider(color = Color(0xFF334155), thickness = 0.5.dp)
                         }
                     }
                 }
@@ -192,7 +192,7 @@ fun CustomerDisplayScreen(state: CustomerDisplayState) {
                             SummaryRow("Discount", "-₹${String.format(Locale.US, "%.2f", state.totals.discountTotal)}", Color(0xFF00D4B2))
                         }
 
-                        Divider(color = Color(0xFF475569), modifier = Modifier.padding(vertical = 12.dp))
+                        HorizontalDivider(color = Color(0xFF475569), modifier = Modifier.padding(vertical = 12.dp))
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
